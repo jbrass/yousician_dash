@@ -1,24 +1,27 @@
 import os
+
 import pandas as pd
-from dash import Dash, html, dcc, dash_table, callback, Input, Output
-import plotly.graph_objects as go
 import plotly.express as px
+import plotly.graph_objects as go
+from dash import Dash, Input, Output, callback, dash_table, dcc, html
 
 from data_loader import (
-    load_history,
-    load_stats,
     load_exercise_progress,
-    songs_by_instrument,
+    load_history,
+    load_song_time_summary,
+    load_stats,
     practice_time_by_week,
+    songs_by_instrument,
 )
 
 DATA_ROOT = os.environ.get(
-    "YUSICIAN_DATA_ROOT", "/Users/jbrass/Development/yousician_dash/data"
+    "YUSICIAN_DATA_ROOT", "data"
 )
 
 history_df = load_history()
 stats_df = load_stats()
 exercise_df = load_exercise_progress()
+song_time = load_song_time_summary()
 
 songs_df = (
     songs_by_instrument(history_df)
@@ -48,6 +51,73 @@ instruments = sorted(
     )
 )
 
+
+def _fmt_minutes(s):
+    return (s / 60.0).round(1)
+
+
+# Prepare a wide table for Play vs Practice in minutes
+def build_song_minutes_table(song_time_df):
+    if song_time_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "title",
+                "practice_min",
+                "play_min",
+                "total_min",
+                "sessions_practice",
+                "sessions_play",
+            ]
+        )
+    g = song_time_df.copy()
+    g["minutes"] = g["total_duration_sec"] / 60.0
+    wide = g.pivot_table(
+        index=["song_id", "title"],
+        columns="play_mode",
+        values="minutes",
+        aggfunc="sum",
+        fill_value=0,
+    ).reset_index()
+    sess = g.pivot_table(
+        index=["song_id", "title"],
+        columns="play_mode",
+        values="sessions",
+        aggfunc="sum",
+        fill_value=0,
+    ).reset_index()
+    merged = pd.merge(
+        wide, sess, on=["song_id", "title"], suffixes=("_min", "_sessions")
+    )
+    # Normalize column names
+    merged = merged.rename(
+        columns={"practice_min": "practice_min", "play_min": "play_min"}
+    )
+    # Ensure columns exist
+    for col in ["practice_min", "play_min", "practice_sessions", "play_sessions"]:
+        if col not in merged.columns:
+            if col.endswith("_min"):
+                merged[col] = 0.0
+            else:
+                merged[col] = 0
+    # Some pivots may produce columns like ('unknown_min'); include in total
+    minute_cols = [c for c in merged.columns if c.endswith("_min")]
+    merged["total_min"] = merged[minute_cols].sum(axis=1)
+    # Try to map sessions columns
+    if "practice_sessions" not in merged.columns and "practice" in sess.columns:
+        merged["practice_sessions"] = sess["practice"]
+    if "play_sessions" not in merged.columns and "play" in sess.columns:
+        merged["play_sessions"] = sess["play"]
+    # Keep top by practice time
+    merged = merged[
+        ["song_id", "title", "practice_min", "play_min", "total_min"]
+        + [c for c in merged.columns if c.endswith("_sessions")]
+    ]
+    merged = merged.sort_values("practice_min", ascending=False)
+    return merged
+
+
+song_minutes = build_song_minutes_table(song_time)
+
 app = Dash(__name__)
 app.title = "Yousician Analytics"
 
@@ -59,7 +129,7 @@ app.layout = html.Div(
                 html.P("Explore your Yousician gameplay history and progress."),
                 html.Div(
                     [
-                        html.Label("Instrument"),
+                        html.Label("Instrument (for some views)"),
                         dcc.Dropdown(
                             id="instrument-filter",
                             options=[
@@ -70,7 +140,7 @@ app.layout = html.Div(
                             placeholder="All instruments",
                         ),
                     ],
-                    style={"width": "300px"},
+                    style={"width": "350px"},
                 ),
                 html.Hr(),
             ],
@@ -81,7 +151,7 @@ app.layout = html.Div(
             value="tab-songs",
             children=[
                 dcc.Tab(
-                    label="Songs",
+                    label="Songs (Plays)",
                     value="tab-songs",
                     children=[
                         html.Br(),
@@ -114,7 +184,54 @@ app.layout = html.Div(
                     ],
                 ),
                 dcc.Tab(
-                    label="Practice Time",
+                    label="Practice vs Play (by Song)",
+                    value="tab-songtime",
+                    children=[
+                        html.Br(),
+                        html.Div(
+                            [
+                                html.H3("Practice vs Play time per Song"),
+                                html.P(
+                                    "Computed from ysapi events. Minutes are aggregated from 'song_played' events by play_mode."
+                                ),
+                                dash_table.DataTable(
+                                    id="song-minutes-table",
+                                    columns=[
+                                        {"name": "Song", "id": "title"},
+                                        {
+                                            "name": "Practice (min)",
+                                            "id": "practice_min",
+                                            "type": "numeric",
+                                            "format": {"specifier": ".1f"},
+                                        },
+                                        {
+                                            "name": "Play (min)",
+                                            "id": "play_min",
+                                            "type": "numeric",
+                                            "format": {"specifier": ".1f"},
+                                        },
+                                        {
+                                            "name": "Total (min)",
+                                            "id": "total_min",
+                                            "type": "numeric",
+                                            "format": {"specifier": ".1f"},
+                                        },
+                                    ],
+                                    data=song_minutes.to_dict("records"),
+                                    page_size=15,
+                                    sort_action="native",
+                                    filter_action="native",
+                                    style_table={"overflowX": "auto"},
+                                ),
+                                html.Br(),
+                                dcc.Graph(id="song-minutes-bar"),
+                            ],
+                            style={"padding": "16px"},
+                        ),
+                    ],
+                ),
+                dcc.Tab(
+                    label="Practice Time (Weekly)",
                     value="tab-time",
                     children=[
                         html.Br(),
@@ -226,6 +343,23 @@ def update_practice_time(instruments_selected):
     return fig
 
 
+@callback(Output("song-minutes-bar", "figure"), Input("instrument-filter", "value"))
+def update_song_minutes_chart(_):
+    df = song_minutes.copy()
+    # Show top 20 by practice minutes by default
+    top = df.sort_values("practice_min", ascending=False).head(20)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(name="Practice", x=top["title"], y=top["practice_min"]))
+    fig.add_trace(go.Bar(name="Play", x=top["title"], y=top["play_min"]))
+    fig.update_layout(
+        barmode="stack",
+        xaxis_tickangle=45,
+        yaxis_title="Minutes",
+        margin=dict(t=30, b=120),
+    )
+    return fig
+
+
 @callback(
     Output("exercise-heatmap", "figure"),
     Output("exercise-meta", "children"),
@@ -257,4 +391,4 @@ def update_heatmap(exercise_id):
 
 
 if __name__ == "__main__":
-    app.run_server(debug=False, host="0.0.0.0", port=8050)
+    app.run(debug=False, host="0.0.0.0", port=8050)
