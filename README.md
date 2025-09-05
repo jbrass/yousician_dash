@@ -14,7 +14,12 @@ Yousician Dash is a web dashboard for visualizing and exploring your exported Yo
 
 ### Prerequisites
 - Python 3.8+
-- Your exported Yousician data (JSON files)
+- Your exported Yousician data (JSON files). 
+
+### Getting the data
+- Go to [https://account.yousician.com/](https://account.yousician.com/) and find the "Download your information" link at the bottom under "Advanced settings"
+- click "Download"
+- Yousician will email you a link to download your data.
 
 ### Installation
 1. Clone this repository and place your exported data in the `data/` directory (see below).
