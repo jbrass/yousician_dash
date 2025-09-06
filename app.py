@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, callback, dash_table, dcc, html
+import dash_bootstrap_components as dbc
 
 from data_loader import (
     load_exercise_progress,
@@ -118,8 +119,9 @@ def build_song_minutes_table(song_time_df):
 
 song_minutes = build_song_minutes_table(song_time)
 
-app = Dash(__name__)
+app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 app.title = "Yousician Analytics"
+server = app.server
 
 app.layout = html.Div(
     [
